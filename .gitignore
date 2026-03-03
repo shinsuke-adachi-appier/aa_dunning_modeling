@@ -1,0 +1,10 @@
+# Local env (paths, optional secrets); copy from .env.example
+.env
+# Virtualenv and Python
+.venv/
+__pycache__/
+*.pyc
+# Optional: uncomment if you don't want to commit these
+# logs/
+# artifacts/
+.env

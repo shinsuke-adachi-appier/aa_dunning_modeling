@@ -7,7 +7,6 @@ Uses: X_hold, y_hold, model_temporal, invoice_ids, optional timestamps for TTR.
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 from typing import Optional, Tuple, List
 
 
@@ -245,9 +244,10 @@ def optimal_slot_for_invoice(
     cat_features: List[str],
     first_attempt_timestamp: Optional[pd.Timestamp] = None,
     feature_cols: Optional[List[str]] = None,
+    delay_hours: Optional[List[int]] = None,
 ) -> Tuple[int, float, pd.DataFrame]:
     """
-    Generate candidate slots (24, 36, ..., 120h after base), score with model; return (1-based slot index of max P, max P, candidate DataFrame).
+    Generate candidate slots (e.g. 24, 28, ..., 120h after base), score with model; return (1-based slot index of max P, max P, candidate DataFrame).
     """
     try:
         model_feature_names = getattr(model, "feature_names_", None)
@@ -260,6 +260,7 @@ def optimal_slot_for_invoice(
     slots = generate_candidate_slots(
         invoice_row, base_timestamp,
         first_attempt_timestamp=first_attempt_timestamp,
+        delay_hours=delay_hours,
         feature_cols=feature_cols,
     )
     # Ensure column order matches model

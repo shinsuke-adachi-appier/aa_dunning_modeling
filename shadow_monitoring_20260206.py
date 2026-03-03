@@ -1,11 +1,11 @@
 """
 Shadow monitoring: log the model's "best choice" (optimal retry time) for every invoice
-currently in a dunning cycle for future comparison against Chargebee's actual performance.
+currently in a dunning cycle for future comparison and probability drift over a 14-day period.
 
-Uses the same inference logic as dunning_modeling.ipynb:
-- Calibrated CatBoost model (model_temporal_calibrated)
-- generate_candidate_slots / optimal_slot_for_invoice from ranking_backtest.py
-- Point-in-time: base_timestamp = most recent payment_failed; slots 24h–120h after base.
+- Append-mode CSV: each cron run appends rows (same invoice can appear multiple times).
+- Time-aware features: time_since_prev_attempt and cumulative_delay_hours at current run time.
+- Slots: 4-hour resolution, 24–120h from current run time (5-day window).
+- Metadata: inference_run_id, snapshot_hour, days_into_dunning for evaluation.
 """
 
 from __future__ import annotations
@@ -13,12 +13,16 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+# 4-hour resolution, 120h (5 days) from run time
+SHADOW_DELAY_HOURS = list(range(24, 121, 4))  # 24, 28, ..., 120
 
 # Allow importing ranking_backtest when run from repo root (e.g. python modeling/shadow_monitoring_20260206.py).
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -29,42 +33,55 @@ if str(_MODULE_DIR) not in sys.path:
 # 1. Data connection & filter (framework — fill BigQuery later)
 # ---------------------------------------------------------------------------
 
-# Training window cutoff: exclude data after this date to prevent leakage.
-TRAINING_CUTOFF_DATE = "2026-01-31"
+# Training window cutoff metadata: shadow period starts on/after this date.
+TRAINING_CUTOFF_DATE = "2026-02-14"
+LAST_DUNNING_AT_OR_AFTER = "2026-02-15"
 
 def fetch_active_dunning_invoices() -> pd.DataFrame:
     """
-    Connect to BigQuery and pull active dunning invoices.
-
-    Filter:
-    - Dunning status = 'active' OR last failure within the last 7 days.
-    - Do not use data after TRAINING_CUTOFF_DATE for training; this script
-      only runs inference on current state.
-
-    Returns:
-        DataFrame with one row per invoice (or per last attempt). Required columns
-        (adjust to match your BigQuery schema):
-        - linked_invoice_id (invoice_id)
-        - customer_id
-        - updated_at (or last_failure_at): timestamp of most recent payment_failed
-        - first_attempt_at
-        - prev_decline_code, billing_country, gateway, funding_type_norm, card_brand,
-          prev_card_status, Domain_category, invoice_attempt_no, amount
-        - localized_time or timezone + updated_at for local hour/day (see build_invoice_row)
+    Connect to BigQuery and pull active dunning invoices (one row per invoice = latest attempt).
+    The model predicts the *next* attempt, so the latest attempt's outcome is the "previous" state:
+    we use its Decline_code_norm and card_status as prev_decline_code and prev_card_status.
+    No LAG: we simply take the latest row and rename those columns.
     """
-    # TODO: Implement BigQuery connection and query.
-    # Example placeholder:
-    # from google.cloud import bigquery
-    # client = bigquery.Client()
-    # query = """
-    #   SELECT ...
-    #   FROM ...
-    #   WHERE (dunning_status = 'active' OR last_failure_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))
-    #   AND last_failure_at < TIMESTAMP('{cutoff}')
-    # """.format(cutoff=TRAINING_CUTOFF_DATE)
-    # return client.query(query).to_dataframe()
-
-    return pd.DataFrame()
+    try:
+        from txn_pipeline import get_bq_client, load_bigquery_table, add_timezone_features
+    except Exception as e:
+        print(f"Error importing txn_pipeline: {e}", file=sys.stderr)
+        raise
+    try:
+        client = get_bq_client(project="aa-datamart", location="europe-west1")
+        query = """
+            WITH LatestState AS (
+                SELECT *,
+                    ROW_NUMBER() OVER(PARTITION BY linked_invoice_id ORDER BY updated_at DESC) AS latest_row,
+                    MIN(updated_at) OVER(PARTITION BY linked_invoice_id) AS first_attempt_at_calc
+                FROM `aa-datamart.billing_dm.MISc_vw_txn_enriched_subID_fallback`
+                WHERE invoice_success_attempt_no IS NULL
+                  AND invoice_attempt_count < 12
+                  AND updated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 DAY)
+            )
+            SELECT * EXCEPT(latest_row)
+            FROM LatestState
+            WHERE latest_row = 1
+            ORDER BY updated_at ASC;
+        """
+        active_df = load_bigquery_table(client, query)
+        # Rename latest attempt's outcome columns → "previous" for the next prediction
+        rename_map = {}
+        if "Decline_code_norm" in active_df.columns:
+            rename_map["Decline_code_norm"] = "prev_decline_code"
+        if "card_status" in active_df.columns:
+            rename_map["card_status"] = "prev_card_status"
+        if "first_attempt_at" not in active_df.columns and "first_attempt_at_calc" in active_df.columns:
+            rename_map["first_attempt_at_calc"] = "first_attempt_at"
+        if rename_map:
+            active_df = active_df.rename(columns=rename_map)
+        active_df = add_timezone_features(active_df)
+        return active_df
+    except Exception as e:
+        print(f"BigQuery error in fetch_active_dunning_invoices: {e}", file=sys.stderr)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -97,31 +114,42 @@ def build_invoice_row(
     row: pd.Series,
     base_timestamp: pd.Timestamp,
     first_attempt_at: pd.Timestamp,
+    as_of_timestamp: Optional[pd.Timestamp] = None,
 ) -> pd.Series:
     """
-    Build one feature row for inference from a raw invoice/attempt row.
-    Temporal features are set at base_timestamp; generate_candidate_slots will
-    overwrite them per slot (time_since_prev_attempt, cumulative_delay_hours, hour_*, dow_*, day_*, dist_to_payday).
-    """
-    base = pd.Timestamp(base_timestamp)
-    first = pd.Timestamp(first_attempt_at)
+    Build one feature row for inference.
 
-    # Temporal at base (will be overwritten per slot; needed for column presence)
-    hour = base.hour + base.minute / 60.0 + base.second / 3600.0
+    - base_timestamp: latest attempt's updated_at (current failure time). Used as "previous" for the next prediction.
+    - time_since_prev_attempt = (as_of_timestamp - base_timestamp) = (inference_run_at - latest_failure_updated_at).
+    - cumulative_delay_hours = (as_of_timestamp - first_attempt_at) = (inference_run_at - first_attempt_at).
+    - invoice_attempt_no: from the latest record (row), i.e. the attempt number of the current failure.
+    - prev_decline_code / prev_card_status: from the latest attempt (renamed from Decline_code_norm / card_status in fetch).
+    generate_candidate_slots overwrites temporal features per slot.
+    """
+    base = pd.Timestamp(base_timestamp)   # latest_failure_updated_at
+    first = pd.Timestamp(first_attempt_at)
+    as_of = pd.Timestamp(as_of_timestamp) if as_of_timestamp is not None else base
+
+    # time_since_prev_attempt = hours since latest (current) failure
+    time_since_prev = (as_of - base).total_seconds() / 3600.0
+    # cumulative_delay_hours = hours since first attempt
+    cumulative_delay = (as_of - first).total_seconds() / 3600.0
+
+    # Cyclic features at as_of (placeholder; generate_candidate_slots overwrites per slot)
+    hour = as_of.hour + as_of.minute / 60.0 + as_of.second / 3600.0
     hour_sin = np.sin(2 * np.pi * hour / 24)
     hour_cos = np.cos(2 * np.pi * hour / 24)
-    dow = base.dayofweek
+    dow = as_of.dayofweek
     dow_sin = np.sin(2 * np.pi * dow / 7)
     dow_cos = np.cos(2 * np.pi * dow / 7)
-    day_of_month = base.day
-    max_days = base.days_in_month
+    day_of_month = as_of.day
+    max_days = as_of.days_in_month
     day_sin = np.sin(2 * np.pi * (day_of_month - 1) / max_days)
     day_cos = np.cos(2 * np.pi * (day_of_month - 1) / max_days)
     dist_to_payday = min(abs(day_of_month - 1), abs(day_of_month - 15), abs(day_of_month - 30))
-    time_since_prev = 0.0  # at base
-    cumulative_delay = (base - first).total_seconds() / 3600.0
 
     amount = float(row.get("amount", 0) or 0)
+    # invoice_attempt_no from latest record (current failure attempt number)
     attempt_no = int(row.get("invoice_attempt_no", 0) or 0)
     log_charge_amount = np.log1p(amount)
     is_debit = 1 if (str(row.get("funding_type_norm", "") or "").lower() == "debit") else 0
@@ -154,79 +182,117 @@ def build_invoice_row(
 # ---------------------------------------------------------------------------
 
 def load_calibrated_model(model_path: str) -> Any:
-    """Load the calibrated CatBoost model (saved from notebook)."""
+    """Load the calibrated model. Exits with code 1 on failure so cron can log."""
     import joblib
+
+    try:
+        from train_dunning_v2_20260206 import IsotonicCalibratedClassifier
+        setattr(sys.modules["__main__"], "IsotonicCalibratedClassifier", IsotonicCalibratedClassifier)
+    except ImportError:
+        pass
+
     path = Path(model_path)
     if not path.is_absolute():
         path = _MODULE_DIR / path
-    return joblib.load(path)
+    if not path.exists():
+        print(f"Model file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        print(f"Failed to load model from {path}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def run_inference_for_invoice(
     invoice_row: pd.Series,
-    base_timestamp: pd.Timestamp,
+    base_timestamp_for_slots: pd.Timestamp,
     first_attempt_at: pd.Timestamp,
     model: Any,
-) -> Tuple[Optional[pd.Timestamp], Optional[float], Optional[dict]]:
+) -> Tuple[Optional[pd.Timestamp], Optional[float], Optional[dict], Dict[int, float]]:
     """
-    Score candidate slots and return (optimal_retry_at, max_prob, raw_features_snapshot).
-    Uses optimal_slot_for_invoice from ranking_backtest (same as dunning_modeling.ipynb).
+    Score candidate slots 24–120h (4-hour resolution) from base_timestamp_for_slots (current run time).
+    Returns (optimal_retry_at, max_prob, raw_features_snapshot, probs_by_delay) where probs_by_delay
+    maps delay_hours (e.g. 24, 28, ..., 120) to probability.
     """
-    from ranking_backtest import (
-        DEFAULT_DELAY_HOURS,
-        optimal_slot_for_invoice,
-    )
+    from ranking_backtest import optimal_slot_for_invoice
 
     slot_num, max_prob, slots_df = optimal_slot_for_invoice(
         invoice_row,
-        base_timestamp,
+        base_timestamp_for_slots,
         model,
         CAT_FEATURES,
         first_attempt_timestamp=first_attempt_at,
         feature_cols=[c for c in MODEL_FEATURE_NAMES if c in invoice_row.index],
+        delay_hours=SHADOW_DELAY_HOURS,
     )
-    delay_h = DEFAULT_DELAY_HOURS[slot_num - 1]
-    optimal_retry_at = pd.Timestamp(base_timestamp) + pd.Timedelta(hours=delay_h)
+    base_ts = pd.Timestamp(base_timestamp_for_slots)
+    delay_h = SHADOW_DELAY_HOURS[slot_num - 1]
+    optimal_retry_at = base_ts + pd.Timedelta(hours=delay_h)
+    optimal_retry_at = optimal_retry_at.round("h")
 
     raw_snapshot = slots_df.iloc[slot_num - 1].drop("prob", errors="ignore").to_dict()
     for k, v in raw_snapshot.items():
         if isinstance(v, (np.floating, np.integer)):
             raw_snapshot[k] = float(v)
 
-    return optimal_retry_at, max_prob, raw_snapshot
+    probs_by_delay: Dict[int, float] = {
+        d: round(float(slots_df.iloc[i]["prob"]), 6)
+        for i, d in enumerate(SHADOW_DELAY_HOURS)
+    }
+
+    return optimal_retry_at, max_prob, raw_snapshot, probs_by_delay
 
 
 # ---------------------------------------------------------------------------
 # 4. Shadow logging: main loop and output
 # ---------------------------------------------------------------------------
 
+def _default_slot_log_path(output_path: Optional[str]) -> Optional[str]:
+    """Derive slot log path from main shadow log path: same dir, file shadow_slot_log.csv."""
+    if not output_path:
+        return None
+    p = Path(output_path)
+    if not p.is_absolute():
+        p = _MODULE_DIR / p
+    return str(p.parent / "shadow_slot_log.csv")
+
+
 def run_shadow_monitoring(
     active_df: pd.DataFrame,
     model_path: str,
     model_version_id: Optional[str] = None,
     output_path: Optional[str] = None,
+    slot_log_path: Optional[str] = None,
     max_hours_since_base: int = 120,
 ) -> pd.DataFrame:
     """
-    For each invoice in active_df, compute the model's best retry time and log to a results DataFrame.
+    For each invoice, compute best retry in the next 5 days (from current run time). Append rows to CSV.
+    Also appends one row per invoice (wide format: prob_24h, ..., prob_120h) to a separate slot log CSV.
 
-    - base_timestamp = most recent payment_failed (e.g. updated_at or last_failure_at).
-    - If (now - base_timestamp) > max_hours_since_base (120h), log as EXPIRED_DUNNING.
-    - Otherwise run inference and record suggested_optimal_retry_at, suggested_max_prob, raw_features_snapshot.
+    Feature alignment:
+    - Each row from BQ is the latest attempt (current failure). Its outcome is the "previous" for the next prediction.
+    - time_since_prev_attempt = (inference_run_at - latest_failure_updated_at), i.e. inference_run_at - row.updated_at.
+    - cumulative_delay_hours = (inference_run_at - first_attempt_at).
+    - invoice_attempt_no and prev_decline_code / prev_card_status come from the latest record.
     """
-    from ranking_backtest import DEFAULT_DELAY_HOURS
-
     model = load_calibrated_model(model_path)
     inference_run_at = pd.Timestamp.utcnow()
+    inference_run_id = str(uuid.uuid4())
+    snapshot_hour = int(inference_run_at.hour)
+
     version_id = model_version_id or os.path.basename(model_path).replace(".joblib", "").replace(".pkl", "")
 
-    # Expect one row per invoice (last attempt) with updated_at = last failure, first_attempt_at
-    time_col = "updated_at" if "updated_at" in active_df.columns else "last_failure_at"
+    time_col = "updated_at"
     if time_col not in active_df.columns:
-        raise ValueError(f"Active dataframe must have '{time_col}' (or 'updated_at' / 'last_failure_at') for base timestamp.")
+        raise ValueError(f"Active dataframe must have '{time_col}'.")
     first_col = "first_attempt_at"
 
+    slot_path = slot_log_path if slot_log_path is not None else _default_slot_log_path(output_path)
+
     results: List[dict] = []
+    slot_rows_all: List[dict] = []
+    # One row per invoice = latest attempt (current failure)
     invoices = active_df.drop_duplicates(subset=["linked_invoice_id"], keep="last")
     if "linked_invoice_id" not in invoices.columns and "invoice_id" in invoices.columns:
         invoices = invoices.rename(columns={"invoice_id": "linked_invoice_id"})
@@ -234,6 +300,7 @@ def run_shadow_monitoring(
     for _, raw in tqdm(invoices.iterrows(), total=len(invoices), desc="Shadow inference"):
         invoice_id = raw.get("linked_invoice_id") or raw.get("invoice_id")
         customer_id = raw.get("customer_id")
+        # base_ts = latest attempt's updated_at (current failure) → used for time_since_prev_attempt
         base_ts = pd.Timestamp(raw[time_col])
         first_ts = raw.get(first_col)
         if first_ts is None or pd.isna(first_ts):
@@ -242,63 +309,80 @@ def run_shadow_monitoring(
             first_ts = pd.Timestamp(first_ts)
 
         hours_since_base = (inference_run_at - base_ts).total_seconds() / 3600.0
+        cumulative_delay_hours = (inference_run_at - first_ts).total_seconds() / 3600.0
+        days_into_dunning = cumulative_delay_hours / 24.0
         current_attempt_no = int(raw.get("invoice_attempt_no", 0) or 0)
+
+        meta = {
+            "inference_run_id": inference_run_id,
+            "invoice_id": invoice_id,
+            "customer_id": customer_id,
+            "inference_run_at": inference_run_at,
+            "model_version_id": version_id,
+            "current_attempt_no": current_attempt_no,
+            "snapshot_hour": snapshot_hour,
+            "days_into_dunning": round(days_into_dunning, 4),
+        }
 
         if hours_since_base > max_hours_since_base:
             results.append({
-                "invoice_id": invoice_id,
-                "customer_id": customer_id,
-                "inference_run_at": inference_run_at,
-                "model_version_id": version_id,
+                **meta,
                 "suggested_optimal_retry_at": pd.NaT,
                 "suggested_max_prob": None,
-                "current_attempt_no": current_attempt_no,
                 "raw_features_snapshot": json.dumps({"status": "EXPIRED_DUNNING", "hours_since_base": round(hours_since_base, 2)}),
             })
             continue
 
         try:
-            invoice_row = build_invoice_row(raw, base_ts, first_ts)
+            invoice_row = build_invoice_row(
+                raw,
+                base_ts,   # latest_failure_updated_at
+                first_ts,  # first_attempt_at
+                as_of_timestamp=inference_run_at,
+            )
         except Exception as e:
             results.append({
-                "invoice_id": invoice_id,
-                "customer_id": customer_id,
-                "inference_run_at": inference_run_at,
-                "model_version_id": version_id,
+                **meta,
                 "suggested_optimal_retry_at": pd.NaT,
                 "suggested_max_prob": None,
-                "current_attempt_no": current_attempt_no,
                 "raw_features_snapshot": json.dumps({"error": "build_row", "message": str(e)}),
             })
             continue
 
         try:
-            optimal_retry_at, max_prob, raw_snapshot = run_inference_for_invoice(
-                invoice_row, base_ts, first_ts, model,
+            optimal_retry_at, max_prob, raw_snapshot, probs_by_delay = run_inference_for_invoice(
+                invoice_row,
+                base_timestamp_for_slots=inference_run_at,
+                first_attempt_at=first_ts,
+                model=model,
             )
         except Exception as e:
             results.append({
-                "invoice_id": invoice_id,
-                "customer_id": customer_id,
-                "inference_run_at": inference_run_at,
-                "model_version_id": version_id,
+                **meta,
                 "suggested_optimal_retry_at": pd.NaT,
                 "suggested_max_prob": None,
-                "current_attempt_no": current_attempt_no,
                 "raw_features_snapshot": json.dumps({"error": "inference", "message": str(e)}),
             })
             continue
 
         results.append({
+            **meta,
+            "suggested_optimal_retry_at": optimal_retry_at,
+            "suggested_max_prob": round(max_prob, 6),
+            "raw_features_snapshot": json.dumps(raw_snapshot),
+        })
+
+        wide_row = {
+            "inference_run_id": inference_run_id,
             "invoice_id": invoice_id,
             "customer_id": customer_id,
             "inference_run_at": inference_run_at,
-            "model_version_id": version_id,
-            "suggested_optimal_retry_at": optimal_retry_at,
-            "suggested_max_prob": round(max_prob, 6),
-            "current_attempt_no": current_attempt_no,
-            "raw_features_snapshot": json.dumps(raw_snapshot),
-        })
+            "snapshot_hour_jst": snapshot_hour,
+            "days_into_dunning": round(days_into_dunning, 4),
+        }
+        for d in SHADOW_DELAY_HOURS:
+            wide_row[f"prob_{d}h"] = probs_by_delay.get(d)
+        slot_rows_all.append(wide_row)
 
     out = pd.DataFrame(results)
 
@@ -307,9 +391,19 @@ def run_shadow_monitoring(
         if not path.is_absolute():
             path = _MODULE_DIR / path
         path.parent.mkdir(parents=True, exist_ok=True)
-        out.to_csv(path, index=False, date_format="%Y-%m-%d %H:%M:%S")
-        print(f"Shadow log saved: {path}")
+        write_header = not path.exists()
+        out.to_csv(path, mode="a", header=write_header, index=False, date_format="%Y-%m-%d %H:%M:%S")
 
+    if slot_path and slot_rows_all:
+        slot_path_p = Path(slot_path)
+        if not slot_path_p.is_absolute():
+            slot_path_p = _MODULE_DIR / slot_path_p
+        slot_path_p.parent.mkdir(parents=True, exist_ok=True)
+        slot_df = pd.DataFrame(slot_rows_all)
+        write_header_slot = not slot_path_p.exists()
+        slot_df.to_csv(slot_path_p, mode="a", header=write_header_slot, index=False, date_format="%Y-%m-%d %H:%M:%S")
+
+    out.attrs["slot_rows_appended"] = len(slot_rows_all)
     return out
 
 
@@ -318,30 +412,34 @@ def run_shadow_monitoring(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # 1) Fetch active dunning invoices (implement BigQuery in fetch_active_dunning_invoices)
-    active_df = fetch_active_dunning_invoices()
+    try:
+        active_df = fetch_active_dunning_invoices()
+    except Exception as e:
+        print(f"fetch_active_dunning_invoices failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
     if active_df.empty:
-        print("No active dunning invoices returned. Fill fetch_active_dunning_invoices() with your BigQuery logic.")
+        print("No active dunning invoices returned; nothing to append.")
         return
 
-    # Optional: filter to training window (inference uses current state; cutoff is for training only)
-    # if "updated_at" in active_df.columns:
-    #     active_df = active_df[pd.to_datetime(active_df["updated_at"]).dt.date <= pd.to_datetime(TRAINING_CUTOFF_DATE).date()]
-
-    # 2) Model path: export from notebook with joblib.dump(model_temporal_calibrated, path)
-    model_path = os.environ.get("DUNNING_MODEL_PATH", _MODULE_DIR / "artifacts" / "model_temporal_calibrated.joblib")
+    model_path = os.environ.get("DUNNING_MODEL_PATH", _MODULE_DIR / "models" / "catboost_dunning_calibrated_20260224.joblib")
     model_version_id = os.environ.get("DUNNING_MODEL_VERSION", None)
-    output_path = os.environ.get("SHADOW_LOG_PATH", _MODULE_DIR / "artifacts" / "shadow_log.csv")
+    output_path = os.environ.get("SHADOW_LOG_PATH", str(_MODULE_DIR / "artifacts" / "shadow_log.csv"))
+    slot_log_path = os.environ.get("SHADOW_SLOT_LOG_PATH") or _default_slot_log_path(output_path)
 
-    # 3) Run shadow inference and save
     result_df = run_shadow_monitoring(
         active_df,
         str(model_path),
         model_version_id=model_version_id,
-        output_path=str(output_path),
+        output_path=output_path,
+        slot_log_path=slot_log_path,
         max_hours_since_base=120,
     )
-    print(f"Logged {len(result_df)} invoices.")
+    n = len(result_df)
+    slot_count = result_df.attrs.get("slot_rows_appended", 0)
+    print(f"Appended {n} new predictions to {output_path}.")
+    if slot_log_path and slot_count:
+        print(f"Appended {slot_count} slot log rows (one per invoice, prob_24h–prob_120h) to {slot_log_path}.")
 
 
 if __name__ == "__main__":

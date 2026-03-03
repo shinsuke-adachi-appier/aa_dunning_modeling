@@ -1,0 +1,103 @@
+======================================================================
+Shadow vs Actual (Chargebee) — Statistical Evaluation Report
+======================================================================
+
+1. DATA
+--------------------------------------------------
+Total Invoices Shadowed (unique):         16,483
+Total shadow rows:                         16,483
+Rows with model suggestion (this merge):   16,482
+Actual outcomes matched:                  16,483
+
+2. DUAL-PATH EVALUATION (Initial Intent vs Last-Mile Accuracy)
+--------------------------------------------------
+Initial Intent (oldest record per invoice):
+  Overall Recovery Rate:    0.00%
+  TTR Lift (recovered, valid only): nanh
+
+Last-Mile Accuracy (latest record per invoice):
+  Overall Recovery Rate:    0.00%
+  TTR Lift (recovered, valid only): nanh
+
+3. RECOVERIES (Last-Mile)
+--------------------------------------------------
+Total Recoveries:              0
+Overall recovery rate:         0.00%
+
+4. RELATIVE OPPORTUNITY GAP
+--------------------------------------------------
+High-Value threshold (= 3.0 x global rate): 0.0000
+Chargebee FAILED but model P > threshold (high-value missed): 16,467
+
+6. TTR LIFT (Recovered, valid TTR only: recovered_at >= inference_run_at)
+--------------------------------------------------
+Mean (recovered_at - suggested_optimal_retry_at): nanh
+
+7. DECILE CALIBRATION (Lift Curve)
+--------------------------------------------------
+        count  recovered  mean_predicted  actual_rate
+decile                                               
+0        2907          0        0.001686          0.0
+1        1552          0        0.005324          0.0
+2         623          0        0.008434          0.0
+3        2314          0        0.010614          0.0
+4        1843          0        0.012539          0.0
+5        2464          0        0.012795          0.0
+6        1495          0        0.025400          0.0
+7        1637          0        0.043827          0.0
+8        1647          0        0.247919          0.0
+
+8. EXPECTED VALUE (EV) LIFT
+--------------------------------------------------
+Total Potential Revenue Lift (sum of amount * (P - baseline)): 124,012.75
+
+9. TRANSITION MATRIX BY DECLINE CODE
+--------------------------------------------------
+                                     n  recovered  recovery_rate  mean_ttr_h
+prev_decline_code                                                           
+authentication required             11          0            0.0         NaN
+authentication_required              4          0            0.0         NaN
+blocked card                       141          0            0.0         NaN
+call_issuer                          3          0            0.0         NaN
+card_velocity_exceeded              47          0            0.0         NaN
+cvc declined                        25          0            0.0         NaN
+declined non generic               412          0            0.0         NaN
+do_not_honor                       476          0            0.0         NaN
+expired card                        23          0            0.0         NaN
+expired_card                        22          0            0.0         NaN
+fraud                              713          0            0.0         NaN
+fraudulent                           5          0            0.0         NaN
+generic_decline                    770          0            0.0         NaN
+incorrect_cvc                        2          0            0.0         NaN
+incorrect_number                   155          0            0.0         NaN
+insufficient_funds                 913          0            0.0         NaN
+invalid amount                       6          0            0.0         NaN
+invalid card number                290          0            0.0         NaN
+invalid_account                     67          0            0.0         NaN
+invalid_amount                       1          0            0.0         NaN
+invalid_pin                          2          0            0.0         NaN
+issuer suspected fraud            1094          0            0.0         NaN
+issuer unavailable                   2          0            0.0         NaN
+lost_card                           22          0            0.0         NaN
+not enough balance                7044          0            0.0         NaN
+not supported                      343          0            0.0         NaN
+pickup_card                         20          0            0.0         NaN
+pin tries exceeded                  18          0            0.0         NaN
+processing_error                     2          0            0.0         NaN
+reenter_transaction                 16          0            0.0         NaN
+referral                            14          0            0.0         NaN
+refused                           2408          0            0.0         NaN
+restricted card                    149          0            0.0         NaN
+revocation of auth                 100          0            0.0         NaN
+revocation_of_all_authorizations     4          0            0.0         NaN
+revocation_of_authorization          6          0            0.0         NaN
+stolen_card                         28          0            0.0         NaN
+stop_payment_order                   3          0            0.0         NaN
+transaction not permitted           38          0            0.0         NaN
+transaction_not_allowed            366          0            0.0         NaN
+try_again_later                    214          0            0.0         NaN
+withdrawal amount exceeded         495          0            0.0         NaN
+withdrawal count exceeded            8          0            0.0         NaN
+withdrawal_count_limit_exceeded      1          0            0.0         NaN
+
+======================================================================
