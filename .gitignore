@@ -4,7 +4,9 @@
 .venv/
 __pycache__/
 *.pyc
+# Data and logs (too large to push)
+data/
+logs/
 # Optional: uncomment if you don't want to commit these
-# logs/
 # artifacts/
 .env
