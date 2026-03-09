@@ -2,102 +2,118 @@
 Shadow vs Actual (Chargebee) — Statistical Evaluation Report
 ======================================================================
 
+0. EXECUTIVE SUMMARY
+--------------------------------------------------
+Shadow compared 27,309 unique invoices (last-mile merge) to Chargebee outcomes.
+Overall recovery rate: 1.79% (489 recoveries).
+Model ranking: Top decile lift = 3.24x global rate; AUC-ROC = 0.756, AUC-PR = 0.053.
+Calibration: Brier = 0.0365, ECE = 0.0585, MCE = 0.8701 (lower is better).
+TTR (recovered, valid): mean = -24.56h (negative = recovery before model slot).
+High-value missed (Chargebee failed, model P > 8.95%): 5,402.
+
 1. DATA
 --------------------------------------------------
-Total Invoices Shadowed (unique):         16,483
-Total shadow rows:                         16,483
-Rows with model suggestion (this merge):   16,482
-Actual outcomes matched:                  16,483
+Total Invoices Shadowed (unique):         27,309
+Total shadow rows:                         360,256
+Rows with model suggestion (this merge):   27,296
+Actual outcomes matched:                  27,309
+Shadow inference date range (last-mile):  2026-02-24 13:01:49 to 2026-03-09 03:38:54
+Recovered rows with valid TTR:            471 (recovered_at >= inference_run_at)
 
-2. DUAL-PATH EVALUATION (Initial Intent vs Last-Mile Accuracy)
+2. CALIBRATION METRICS (rows with suggestion)
+--------------------------------------------------
+Brier score (lower better):     0.0365
+Expected Calibration Error:     0.0585
+Max Calibration Error:          0.8701
+
+3. DISCRIMINATIVE METRICS (rows with suggestion)
+--------------------------------------------------
+AUC-ROC:                        0.756
+AUC-PR (average precision):     0.053
+
+4. DUAL-PATH EVALUATION (Initial Intent vs Last-Mile Accuracy)
 --------------------------------------------------
 Initial Intent (oldest record per invoice):
-  Overall Recovery Rate:    0.00%
-  TTR Lift (recovered, valid only): nanh
+  Overall Recovery Rate:    1.79%
+  TTR Lift (recovered, valid only): 67.46h
 
 Last-Mile Accuracy (latest record per invoice):
-  Overall Recovery Rate:    0.00%
-  TTR Lift (recovered, valid only): nanh
+  Overall Recovery Rate:    1.79%
+  TTR Lift (recovered, valid only): -24.56h
 
-3. RECOVERIES (Last-Mile)
+5. RECOVERIES (Last-Mile)
 --------------------------------------------------
-Total Recoveries:              0
-Overall recovery rate:         0.00%
+Total Recoveries:              489
+Overall recovery rate:         1.79%
+  95% CI (bootstrap n=500):        [1.79%, 1.79%]
 
-4. RELATIVE OPPORTUNITY GAP
+6. RELATIVE OPPORTUNITY GAP
 --------------------------------------------------
-High-Value threshold (= 3.0 x global rate): 0.0000
-Chargebee FAILED but model P > threshold (high-value missed): 16,467
+High-Value threshold (= 5.0 x global rate): 0.0895
+Chargebee FAILED but model P > threshold (high-value missed): 5,402
 
-6. TTR LIFT (Recovered, valid TTR only: recovered_at >= inference_run_at)
+7. TEMPORAL PROXIMITY (recovered within ±Nh of model #1 slot)
 --------------------------------------------------
-Mean (recovered_at - suggested_optimal_retry_at): nanh
+  ±6h: 41 (8.4%)
+  ±12h: 63 (12.9%)
+  ±24h: 188 (38.4%)
 
-7. DECILE CALIBRATION (Lift Curve)
+8. TTR LIFT (Recovered, valid TTR only: recovered_at >= inference_run_at)
 --------------------------------------------------
-        count  recovered  mean_predicted  actual_rate
-decile                                               
-0        2907          0        0.001686          0.0
-1        1552          0        0.005324          0.0
-2         623          0        0.008434          0.0
-3        2314          0        0.010614          0.0
-4        1843          0        0.012539          0.0
-5        2464          0        0.012795          0.0
-6        1495          0        0.025400          0.0
-7        1637          0        0.043827          0.0
-8        1647          0        0.247919          0.0
+Mean (recovered_at - suggested_optimal_retry_at): -24.56h
+  95% CI (bootstrap n=500): [-28.46h, -20.66h]
 
-8. EXPECTED VALUE (EV) LIFT
+9. DECILE CALIBRATION (Lift Curve)
 --------------------------------------------------
-Total Potential Revenue Lift (sum of amount * (P - baseline)): 124,012.75
+        count  recovered  mean_predicted  actual_rate  calibration_error
+decile                                                                  
+0        3323          7        0.002358     0.002107           0.000252
+1        2742         12        0.005505     0.004376           0.001129
+2        2353          6        0.009780     0.002550           0.007230
+3        3045         23        0.011460     0.007553           0.003906
+4        2975         41        0.015107     0.013782           0.001326
+5        2063         19        0.021694     0.009210           0.012484
+6        3145         50        0.036731     0.015898           0.020833
+7        2672         90        0.073996     0.033683           0.040313
+8        2390         91        0.161274     0.038075           0.123199
+9        2588        150        0.470082     0.057960           0.412122
 
-9. TRANSITION MATRIX BY DECLINE CODE
+Top Decile Lift Factor (Top Decile Success Rate / Global Rate): 3.24
+  95% CI (bootstrap n=500): [2.79, 3.64]
+
+10. EXPECTED VALUE (EV) LIFT
 --------------------------------------------------
-                                     n  recovered  recovery_rate  mean_ttr_h
-prev_decline_code                                                           
-authentication required             11          0            0.0         NaN
-authentication_required              4          0            0.0         NaN
-blocked card                       141          0            0.0         NaN
-call_issuer                          3          0            0.0         NaN
-card_velocity_exceeded              47          0            0.0         NaN
-cvc declined                        25          0            0.0         NaN
-declined non generic               412          0            0.0         NaN
-do_not_honor                       476          0            0.0         NaN
-expired card                        23          0            0.0         NaN
-expired_card                        22          0            0.0         NaN
-fraud                              713          0            0.0         NaN
-fraudulent                           5          0            0.0         NaN
-generic_decline                    770          0            0.0         NaN
-incorrect_cvc                        2          0            0.0         NaN
-incorrect_number                   155          0            0.0         NaN
-insufficient_funds                 913          0            0.0         NaN
-invalid amount                       6          0            0.0         NaN
-invalid card number                290          0            0.0         NaN
-invalid_account                     67          0            0.0         NaN
-invalid_amount                       1          0            0.0         NaN
-invalid_pin                          2          0            0.0         NaN
-issuer suspected fraud            1094          0            0.0         NaN
-issuer unavailable                   2          0            0.0         NaN
-lost_card                           22          0            0.0         NaN
-not enough balance                7044          0            0.0         NaN
-not supported                      343          0            0.0         NaN
-pickup_card                         20          0            0.0         NaN
-pin tries exceeded                  18          0            0.0         NaN
-processing_error                     2          0            0.0         NaN
-reenter_transaction                 16          0            0.0         NaN
-referral                            14          0            0.0         NaN
-refused                           2408          0            0.0         NaN
-restricted card                    149          0            0.0         NaN
-revocation of auth                 100          0            0.0         NaN
-revocation_of_all_authorizations     4          0            0.0         NaN
-revocation_of_authorization          6          0            0.0         NaN
-stolen_card                         28          0            0.0         NaN
-stop_payment_order                   3          0            0.0         NaN
-transaction not permitted           38          0            0.0         NaN
-transaction_not_allowed            366          0            0.0         NaN
-try_again_later                    214          0            0.0         NaN
-withdrawal amount exceeded         495          0            0.0         NaN
-withdrawal count exceeded            8          0            0.0         NaN
-withdrawal_count_limit_exceeded      1          0            0.0         NaN
+Total Potential Revenue Lift (sum of amount * (P - baseline)): 289,895.20
+  95% CI (bootstrap n=500): [279,030.71, 300,983.18]
+
+11. TRANSITION MATRIX BY DECLINE CODE
+--------------------------------------------------
+                             n  recovered  recovery_rate  mean_ttr_h
+prev_decline_code                                                   
+authentication_required    145          0       0.000000         NaN
+blocked_card               359          0       0.000000         NaN
+call_issuer                 21          0       0.000000         NaN
+do_not_honor              4843         99       0.020442  -27.105065
+expired_card               134          1       0.007463 -110.722778
+fraud                     1594          1       0.000627  -68.850000
+fraudulent                  16          0       0.000000         NaN
+generic_decline           2267         15       0.006617  -20.688481
+insufficient_funds       10642        330       0.031009  -25.049095
+invalid_amount              14          0       0.000000         NaN
+invalid_card              1360          5       0.003676  -25.155833
+invalid_cvc                 37          1       0.027027  -21.827222
+invalid_pin                 35          0       0.000000         NaN
+issuer_suspected_fraud    2542         12       0.004721  -14.418773
+issuer_unavailable           3          0       0.000000         NaN
+lost_stolen_card           152          0       0.000000         NaN
+not_supported              823          0       0.000000         NaN
+processing_error            31          0       0.000000         NaN
+restricted_card            219          2       0.009132  -26.209028
+revocation                 277          1       0.003610  -20.691389
+stop_payment                 5          0       0.000000         NaN
+transaction_not_allowed    710          3       0.004225   14.142407
+try_again_later            308          4       0.012987  -11.914306
+unknown                     10          1       0.100000  -21.041667
+velocity_exceeded          762         14       0.018373  -12.844921
 
 ======================================================================
