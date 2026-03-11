@@ -8,5 +8,5 @@ __pycache__/
 data/
 logs/
 # Optional: uncomment if you don't want to commit these
-# artifacts/
+artifacts/
 .env

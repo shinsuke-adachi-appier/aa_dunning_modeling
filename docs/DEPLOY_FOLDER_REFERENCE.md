@@ -13,7 +13,7 @@ This document describes all files under **`deploy/`** (shared library, schemas, 
 |------|--------|
 | **lib/** | Shared library: model load, features, slots, BQ fetch, timezone/country data. Used by inference job only. |
 | **inference_job/** | Entrypoint `main.py`; writes schedule + optional feature log. |
-| **trigger_job/** | Entrypoint `main.py`; reads schedule, Pre-Flight, Retry API, trigger log. |
+| **trigger_job/** | Entrypoint `main.py`; reads schedule, Retry API, trigger log. No pre-flight status check. |
 | **bq_schema/** | BigQuery DDL for schedule and trigger log tables. |
 | **Root** | README, env.example, Dockerfile, requirements-deploy.txt, train_dunning_v2 stub. |
 
@@ -53,7 +53,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 | Item | Description |
 |------|-------------|
 | **Role** | Query BigQuery for active dunning invoices; apply renames, timezone features, sanitization. |
-| **Env** | `BQ_PROJECT`, `BQ_SOURCE_TABLE` (required); `BQ_LOCATION` (default `europe-west1`). |
+| **Env** | `BQ_PROJECT` (required); `BQ_LOCATION` (default `europe-west1`). Source data comes from the embedded pipeline query in `lib/bq_fetch.py`, not from `BQ_SOURCE_TABLE`. |
 | **Function** | `fetch_active_dunning()` — SQL: latest row per `linked_invoice_id`, `invoice_success_attempt_no IS NULL`, `invoice_attempt_count < 12`, last 5 days, `Decline_type_for_retry = 'Soft decline'`. Renames `Decline_code_norm` → `prev_decline_code`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at`. Calls `add_timezone_features(df)`; sanitizes `prev_decline_code` and `billing_country` to `"UNKNOWN"`. Returns DataFrame. |
 
 ### 2.5 `lib/timezone_utils.py`
@@ -80,7 +80,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 | Item | Description |
 |------|-------------|
 | **Table** | `PROJECT_ID.DATASET.production_dunning_schedule` — replace placeholders. |
-| **Columns** | `invoice_id`, `optimal_retry_at_utc`, `attempt_number`, `model_version_id`, `max_prob`, `inference_run_id`, `created_at`, `status` (e.g. PENDING, TRIGGERED, CANCELLED_PAID). |
+| **Columns** | `invoice_id`, `optimal_retry_at_utc`, `attempt_number`, `max_prob`, `inference_run_id`, `created_at`, `status` (e.g. PENDING, TRIGGERED, CANCELLED_PAID). |
 | **Partition** | `PARTITION BY DATE(optimal_retry_at_utc)` for efficient current-hour queries by trigger job. |
 | **Written by** | Inference job. **Read by** trigger job. |
 
@@ -89,7 +89,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 | Item | Description |
 |------|-------------|
 | **Table** | `PROJECT_ID.DATASET.dunning_retry_trigger_log` — replace placeholders. |
-| **Columns** | `invoice_id`, `optimal_retry_at_utc`, `triggered_at`, `idempotency_key`, `api_response_status` (HTTP status), `model_version_id`, `error_message`. |
+| **Columns** | `invoice_id`, `optimal_retry_at_utc`, `triggered_at`, `idempotency_key`, `api_response_status` (HTTP status), `error_message`, `status` (Success \| Failed \| Error \| DRY_RUN \| VELOCITY_CAP_7D), `message`, `txn_id`, `attempt_number`, `comment_status`. |
 | **Written by** | Trigger job (one row per retry API attempt / dry-run log). |
 
 ---
@@ -100,7 +100,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 
 | Item | Description |
 |------|-------------|
-| **Purpose** | Deploy-folder overview: layout, build/run commands, required env for inference and trigger, what to implement (BQ, `resolve_invoice_status`, `call_retry_api`, secrets). Points to PRODUCTION_DEPLOYMENT_GUIDE for full architecture. |
+| **Purpose** | Deploy-folder overview: layout, build/run commands, required env for inference and trigger, what to implement (BQ, `call_retry_api`, secrets). Points to PRODUCTION_DEPLOYMENT_GUIDE for full architecture. |
 
 ### 4.2 `env.example`
 
@@ -139,7 +139,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 | Job | Entrypoint | Reads | Writes |
 |-----|------------|-------|--------|
 | **Inference** | `python inference_job/main.py` | Env (BQ, model path); BQ source table via `lib.bq_fetch.fetch_active_dunning()` | `production_dunning_schedule`; optional `dunning_inference_feature_log` |
-| **Trigger** | `python trigger_job/main.py` | Env (BQ); `production_dunning_schedule` for current UTC hour; Pre-Flight via `resolve_invoice_status` | Retry API (you implement `call_retry_api`); `dunning_retry_trigger_log` |
+| **Trigger** | `python trigger_job/main.py` | Env (BQ); `production_dunning_schedule` for current UTC hour | Retry API (you implement `call_retry_api`); `dunning_retry_trigger_log`; no pre-flight |
 
 ---
 

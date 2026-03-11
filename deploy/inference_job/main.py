@@ -45,6 +45,7 @@ def write_schedule_to_bq(rows: list[dict]) -> None:
     df = pd.DataFrame(rows)
     job_config = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
     client.load_table_from_dataframe(df, table_id, job_config=job_config).result()
+    print(f"Written {len(rows)} rows to BigQuery {table_id}.", file=sys.stderr)
 
 
 def write_feature_log_to_bq(rows: list[dict]) -> None:
@@ -76,7 +77,13 @@ def write_feature_log_to_bq(rows: list[dict]) -> None:
 
 
 def run() -> None:
-    model_path = os.environ.get("GCS_MODEL_URI") or os.environ.get("DUNNING_MODEL_PATH")
+    # Prefer local model when path exists (avoids GCS with placeholder bucket in local dev).
+    model_path = None
+    local_path = os.environ.get("DUNNING_MODEL_PATH")
+    if local_path and Path(local_path).exists():
+        model_path = local_path
+    if not model_path:
+        model_path = os.environ.get("GCS_MODEL_URI")
     if not model_path:
         print("Set GCS_MODEL_URI or DUNNING_MODEL_PATH.", file=sys.stderr)
         sys.exit(1)
@@ -87,6 +94,9 @@ def run() -> None:
     use_fallback_global = calibrated is None
     if calibrated is None:
         model_version_id = "fallback_24h"
+        print("Model not loaded; using fallback_24h for all rows.", file=sys.stderr)
+    else:
+        print(f"Model loaded from {model_path}.", file=sys.stderr)
 
     active_df = bq_fetch.fetch_active_dunning()
     if active_df.empty:
@@ -122,8 +132,10 @@ def run() -> None:
                     raw, base_ts, first_ts, as_of_timestamp=inference_run_at, timezone=tz,
                     as_of_localized=raw.get("localized_time"),
                 )
-            except Exception:
+            except Exception as e:
                 version_for_row = "fallback_24h"
+                if len(schedule_rows) == 0:  # log first failure only
+                    print(f"First fallback (build_invoice_row): {e}", file=sys.stderr)
             else:
                 try:
                     optimal_retry_at, max_prob, raw_snapshot, _ = slots.run_inference_for_invoice(
@@ -140,6 +152,7 @@ def run() -> None:
                             "inference_run_id": inference_run_id,
                             "created_at": _to_utc_ts(inference_run_at),
                             "invoice_id": invoice_id,
+                            "model_version_id": model_version_id,
                         }
                         for k, v in raw_snapshot.items():
                             if k in features.MODEL_FEATURE_NAMES:
@@ -147,25 +160,27 @@ def run() -> None:
                         fl["max_prob"] = max_prob
                         fl["optimal_retry_at_utc"] = optimal_retry_at_utc
                         feature_log_rows.append(fl)
-                except Exception:
+                except Exception as e:
                     version_for_row = "fallback_24h"
+                    if len(schedule_rows) == 0:
+                        print(f"First fallback (run_inference_for_invoice): {e}", file=sys.stderr)
 
         schedule_rows.append({
             "invoice_id": invoice_id,
             "optimal_retry_at_utc": optimal_retry_at_utc,
             "attempt_number": attempt_number,
-            "model_version_id": version_for_row,
             "max_prob": max_prob,
             "inference_run_id": inference_run_id,
             "created_at": _to_utc_ts(inference_run_at),
             "status": "PENDING",
+            "model_version_id": version_for_row,
         })
 
     write_schedule_to_bq(schedule_rows)
     if feature_log_rows:
         write_feature_log_to_bq(feature_log_rows)
     print(f"Wrote {len(schedule_rows)} rows to production_dunning_schedule; feature_log={len(feature_log_rows)} rows.")
-
+    print(pd.DataFrame(schedule_rows).head())
 
 if __name__ == "__main__":
     run()

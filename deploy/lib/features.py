@@ -27,11 +27,11 @@ CAT_FEATURES = [
 
 # Feature log table schema (optional drift table). Single source of truth; table can be created from this.
 # Order: metadata first, then MODEL_FEATURE_NAMES, then outputs.
-FEATURE_LOG_METADATA_COLUMNS = ["inference_run_id", "created_at", "invoice_id"]
+FEATURE_LOG_METADATA_COLUMNS = ["inference_run_id", "created_at", "invoice_id", "model_version_id"]
 FEATURE_LOG_OUTPUT_COLUMNS = ["max_prob", "optimal_retry_at_utc"]
 # BQ type per column: STRING, FLOAT64, INT64, TIMESTAMP
 FEATURE_LOG_SCHEMA = (
-    [("inference_run_id", "STRING"), ("created_at", "TIMESTAMP"), ("invoice_id", "STRING")]
+    [("inference_run_id", "STRING"), ("created_at", "TIMESTAMP"), ("invoice_id", "STRING"), ("model_version_id", "STRING")]
     + [
         ("prev_decline_code", "STRING"),
         ("hour_sin", "FLOAT64"), ("hour_cos", "FLOAT64"),

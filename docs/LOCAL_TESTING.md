@@ -1,17 +1,17 @@
-# Local dry run and testing (before pushing to Google Cloud)
+# Local dry run and testing (before deploying to Airflow)
 
-Run the inference and trigger jobs on your machine with the same code as Cloud Run. Use **DRY_RUN=1** for the trigger so it never calls Chargebee `collect_payment` (only logs what it would do).
+Run the inference and trigger jobs on your machine with the same code as production Airflow tasks. Use **DRY_RUN=1** for the trigger so it never calls Chargebee `collect_payment` (only logs what it would do).
 
 ---
 
 ## 1. Prerequisites
 
-- **Python 3.11+** and dependencies from `requirements-deploy.txt`
+- **Python 3.11+** and dependencies from `deploy/requirements-deploy.txt`
 - **Google Application Default Credentials** so BigQuery works without a service account key:
   ```bash
   gcloud auth application-default login
   ```
-- **Env vars** (copy `env.example` to `.env` and fill; do not commit `.env`)
+- **Env vars** (copy `deploy/env.example` to `deploy/.env` and fill; do not commit `.env`). For the trigger job dry run, `CHARGEBEE_SITE` and `CHARGEBEE_API_KEY` are required (see env.example).
 
 ---
 
@@ -52,7 +52,7 @@ Then run: `python inference_job/main.py` (and same for trigger).
 
 **Option C — Pass vars explicitly:**
 ```bash
-export BQ_PROJECT=myproject BQ_DATASET=mydataset BQ_SOURCE_TABLE=...
+export BQ_PROJECT=myproject BQ_DATASET=mydataset
 export DUNNING_MODEL_PATH=/path/to/model.joblib
 python inference_job/main.py
 ```
@@ -82,7 +82,7 @@ cd aa_dunning_modeling/deploy
 set -a && source .env && set +a
 
 # Or set key vars by hand:
-# export BQ_PROJECT=... BQ_DATASET=... BQ_SOURCE_TABLE=...
+# export BQ_PROJECT=... BQ_DATASET=...
 # export DUNNING_MODEL_PATH=/path/to/catboost_dunning_calibrated_YYYYMMDD.joblib
 
 python inference_job/main.py
@@ -97,7 +97,6 @@ python inference_job/main.py
 
 With **DRY_RUN=1** the trigger job:
 - Reads from BigQuery (schedule for current UTC hour)
-- Calls **Chargebee GET invoice** (Pre-Flight) for each row
 - **Does not** call Chargebee **collect_payment**; it only appends rows to `dunning_retry_trigger_log` with `error_message="DRY_RUN"`
 
 So you need real **BQ** and **Chargebee** credentials; no payment is triggered.
@@ -118,15 +117,15 @@ python trigger_job/main.py
 
 ## 6. End-to-end local test (inference → trigger dry run)
 
-1. **Create BQ tables** (if not already): run `bq_schema/production_dunning_schedule.sql` and `dunning_retry_trigger_log.sql` (use a dev dataset if you prefer).
+1. **Create BQ tables** (if not already): run `deploy/bq_schema/production_dunning_schedule.sql` and `dunning_retry_trigger_log.sql` (use a dev dataset if you prefer).
 2. **Run inference** once (step 4). Confirm rows in `production_dunning_schedule` with `optimal_retry_at_utc` in the next hour (or current hour).
 3. **Run trigger with DRY_RUN=1** (step 5). Confirm it picks up those rows and writes to `dunning_retry_trigger_log` with `DRY_RUN`, and that it **does not** call `collect_payment`.
 
 ---
 
-## 7. Run with Docker (same image as Cloud Run)
+## 7. Run with Docker (same image as used in Airflow with DockerOperator)
 
-Build the image from the deploy folder and run with env from a file:
+Build the image from the deploy folder and run with env from a file. Use the same pattern when running via Airflow’s DockerOperator.
 
 ```bash
 cd aa_dunning_modeling/deploy
@@ -143,11 +142,11 @@ For inference with a **local** model in Docker, mount the file and set `DUNNING_
 
 ---
 
-## 8. Checklist before pushing to Google Cloud
+## 8. Checklist before deploying to Airflow
 
 | Check | How |
 |-------|-----|
 | Inference runs and writes schedule | Run step 4; query `production_dunning_schedule` in BQ. |
 | Trigger dry run does not call collect_payment | Run step 5 with `DRY_RUN=1`; confirm log rows have `error_message='DRY_RUN'`. |
 | No .env committed | Ensure `.env` is in `.gitignore`; only `env.example` is committed. |
-| Chargebee key not in code | Use env / Secret Manager only; never hardcode. |
+| Chargebee key not in code | Use env / Airflow Variables or Connections only; never hardcode. |

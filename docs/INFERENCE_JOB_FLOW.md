@@ -32,7 +32,7 @@ Entrypoint: **`inference_job/main.py`** → `run()`.
 | Step | What happens | File / module |
 |------|-------------------------------|---------------|
 | 3.1 | Call `bq_fetch.fetch_active_dunning()` | `inference_job/main.py` (line 83) |
-| 3.2 | Read env: `BQ_PROJECT`, `BQ_SOURCE_TABLE`, `BQ_LOCATION` | `lib/bq_fetch.py` |
+| 3.2 | Read env: `BQ_PROJECT`, `BQ_LOCATION`. Run embedded pipeline query (subscription + transaction sources). | `lib/bq_fetch.py` |
 | 3.3 | Run SQL: latest row per `linked_invoice_id`, active dunning (last 5 days, &lt; 12 attempts, Soft decline) | `lib/bq_fetch.py` → `fetch_active_dunning()` |
 | 3.4 | Rename columns: `Decline_code_norm` → `prev_decline_code`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at` | `lib/bq_fetch.py` |
 | 3.5 | **add_timezone_features:** timezone from country (COUNTRY_TZ_MAP), optional zip override; `localized_time`, `local_*`; ensure `updated_at` UTC | `lib/timezone_utils.py` (via `lib/bq_fetch.py`) |
@@ -65,7 +65,7 @@ Entrypoint: **`inference_job/main.py`** → `run()`.
 | 5.4c | Return `optimal_retry_at`, `max_prob`, `raw_snapshot` (best-slot features), `probs_by_delay`; main normalizes `optimal_retry_at_utc = _to_utc_ts(optimal_retry_at)` so output is always **UTC** | `inference_job/main.py`, `lib/slots.py` |
 | 5.5 | On any exception in 5.3/5.4, keep fallback 24h and `version_for_row = 'fallback_24h'` | `inference_job/main.py` (lines 125–126, 153–154) |
 | 5.6 | If feature log enabled and random sample: build feature-log row from `raw_snapshot` + metadata; `created_at` and `optimal_retry_at_utc` set via `_to_utc_ts()`; append to `feature_log_rows` | `inference_job/main.py` (lines 138–150), uses `features.MODEL_FEATURE_NAMES` |
-| 5.7 | Append one schedule row: `invoice_id`, `optimal_retry_at_utc` (UTC), `attempt_number`, `model_version_id`, `max_prob`, `inference_run_id`, `created_at` (UTC via `_to_utc_ts`), `status=PENDING` | `inference_job/main.py` (lines 156–165) |
+| 5.7 | Append one schedule row: `invoice_id`, `optimal_retry_at_utc` (UTC), `attempt_number`, `max_prob`, `inference_run_id`, `created_at` (UTC via `_to_utc_ts`), `status=PENDING` | `inference_job/main.py` (lines 156–165) |
 
 ---
 
