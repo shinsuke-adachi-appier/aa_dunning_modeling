@@ -16,11 +16,12 @@ from sklearn.isotonic import IsotonicRegression
 
 # Must be in scope for joblib.load to unpickle models saved from train_dunning_v2.
 class IsotonicCalibratedClassifier:
-    """Wraps a fitted classifier and calibrates probabilities via IsotonicRegression."""
+    """Wraps a fitted classifier and calibrates probabilities via IsotonicRegression. Supports optional temperature scaling."""
 
-    def __init__(self, estimator, method="isotonic"):
+    def __init__(self, estimator, method="isotonic", temperature=1.0):
         self.estimator = estimator
         self.method = method
+        self.temperature = float(temperature)
         self.calibrator_ = None
 
     def fit(self, X_cal, y_cal):
@@ -32,6 +33,11 @@ class IsotonicCalibratedClassifier:
     def predict_proba(self, X):
         p = self.estimator.predict_proba(X)[:, 1]
         p_cal = self.calibrator_.predict(p).reshape(-1, 1)
+        p_cal = np.clip(p_cal, 1e-7, 1.0 - 1e-7)
+        temperature = getattr(self, "temperature", 1.0)
+        if temperature != 1.0 and temperature > 0:
+            logit = np.log(p_cal / (1.0 - p_cal))
+            p_cal = 1.0 / (1.0 + np.exp(-np.clip(logit / temperature, -500, 500)))
         p_cal = np.clip(p_cal, 0.0, 1.0)
         return np.hstack([1 - p_cal, p_cal])
 

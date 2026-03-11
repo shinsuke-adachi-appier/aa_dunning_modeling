@@ -11,6 +11,7 @@ def engineer_dunning_features(df: pd.DataFrame) -> pd.DataFrame:
     """Soft-decline dunning attempts with temporal and transactional features."""
     df = df.sort_values(by=["linked_invoice_id", "updated_at"]).copy()
     df["prev_decline_code"] = df.groupby("linked_invoice_id")["Decline_code_norm"].shift(1)
+    df["prev_advice_code_group"] = df.groupby("linked_invoice_id")["advice_code_group"].shift(1)
     df["prev_card_status"] = df.groupby("linked_invoice_id")["card_status"].shift(1)
     df["prev_decline_type"] = df.groupby("linked_invoice_id")["Decline_type_for_retry"].shift(1)
     df["prev_attempt_time"] = df.groupby("linked_invoice_id")["updated_at"].shift(1)
@@ -40,12 +41,13 @@ def engineer_dunning_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_success"] = (df["status"] == "success").astype(int)
     df["billing_country"] = df["billing_country"].fillna("UNKNOWN").astype(str)
     df["prev_decline_code"] = df["prev_decline_code"].fillna("UNKNOWN").astype(str)
+    df["prev_advice_code_group"] = df["prev_advice_code_group"].fillna("UNKNOWN").astype(str)
     return df
 
 
 # Feature set (must match notebook keep_cols minus target/group)
 KEEP_COLS = [
-    "linked_invoice_id", "prev_decline_code", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    "linked_invoice_id", "prev_decline_code", "prev_advice_code_group", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
     "day_sin", "day_cos", "dist_to_payday", "log_charge_amount", "is_debit", "amt_per_attempt",
     "time_since_prev_attempt", "cumulative_delay_hours",
     "billing_country", "gateway", "funding_type_norm", "card_brand", "prev_card_status",
@@ -57,13 +59,13 @@ DROP_COLS = [TARGET, GROUP_COL]
 
 # Categorical features for CatBoost
 CAT_FEATURES = [
-    "prev_decline_code", "billing_country", "gateway",
+    "prev_decline_code", "prev_advice_code_group", "billing_country", "gateway",
     "funding_type_norm", "card_brand", "Domain_category", "prev_card_status"
 ]
 
 # Model feature names for inference (no target/group)
 MODEL_FEATURE_NAMES = [
-    "prev_decline_code", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
+    "prev_decline_code", "prev_advice_code_group", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
     "dist_to_payday", "log_charge_amount", "is_debit", "amt_per_attempt",
     "time_since_prev_attempt", "cumulative_delay_hours",
     "billing_country", "gateway", "funding_type_norm", "card_brand", "prev_card_status",
@@ -116,6 +118,7 @@ def build_invoice_row(
 
     out = pd.Series({
         "prev_decline_code": _safe_str(row.get("prev_decline_code")),
+        "prev_advice_code_group": _safe_str(row.get("prev_advice_code_group")),
         "hour_sin": hour_sin, "hour_cos": hour_cos,
         "dow_sin": dow_sin, "dow_cos": dow_cos,
         "day_sin": day_sin, "day_cos": day_cos,

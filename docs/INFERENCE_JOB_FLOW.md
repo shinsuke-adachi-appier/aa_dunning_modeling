@@ -34,9 +34,9 @@ Entrypoint: **`inference_job/main.py`** → `run()`.
 | 3.1 | Call `bq_fetch.fetch_active_dunning()` | `inference_job/main.py` (line 83) |
 | 3.2 | Read env: `BQ_PROJECT`, `BQ_LOCATION`. Run embedded pipeline query (subscription + transaction sources). | `lib/bq_fetch.py` |
 | 3.3 | Run SQL: latest row per `linked_invoice_id`, active dunning (last 5 days, &lt; 12 attempts, Soft decline) | `lib/bq_fetch.py` → `fetch_active_dunning()` |
-| 3.4 | Rename columns: `Decline_code_norm` → `prev_decline_code`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at` | `lib/bq_fetch.py` |
+| 3.4 | Rename columns: `Decline_code_norm` → `prev_decline_code`, `advice_code_group` → `prev_advice_code_group`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at` | `lib/bq_fetch.py` |
 | 3.5 | **add_timezone_features:** timezone from country (COUNTRY_TZ_MAP), optional zip override; `localized_time`, `local_*`; ensure `updated_at` UTC | `lib/timezone_utils.py` (via `lib/bq_fetch.py`) |
-| 3.6 | Sanitize `prev_decline_code` and `billing_country`: fillna + strip → `"UNKNOWN"` | `lib/bq_fetch.py` |
+| 3.6 | Sanitize `prev_decline_code`, `prev_advice_code_group`, and `billing_country`: fillna + strip → `"UNKNOWN"` | `lib/bq_fetch.py` |
 | 3.7 | Return DataFrame; exit early if empty | `inference_job/main.py` (lines 90–93) |
 
 ---
@@ -86,7 +86,7 @@ Entrypoint: **`inference_job/main.py`** → `run()`.
 | Path | Role |
 |------|------|
 | **inference_job/main.py** | Entrypoint; env/config; per-invoice loop; `_to_utc_ts()` for UTC output; schedule/feature-log BQ writes; fallback 24h |
-| **lib/bq_fetch.py** | BigQuery client; SQL for active dunning; column renames; **add_timezone_features**; **prev_decline_code / billing_country sanitization** |
+| **lib/bq_fetch.py** | BigQuery client; SQL for active dunning; column renames; **add_timezone_features**; **prev_decline_code / prev_advice_code_group / billing_country sanitization** |
 | **lib/model.py** | `IsotonicCalibratedClassifier`; GCS download; `joblib.load` |
 | **lib/features.py** | `MODEL_FEATURE_NAMES`, `CAT_FEATURES`, `DELAY_HOURS`, `FEATURE_LOG_SCHEMA`; `build_invoice_row(..., timezone=..., as_of_localized=...)` — time features use **localized timestamp column** when provided, else local conversion via timezone |
 | **lib/slots.py** | `generate_candidate_slots(..., timezone=...)`, `optimal_slot_for_invoice(..., timezone=...)`, `run_inference_for_invoice(..., timezone=...)` — slot temporal features in **local** time when timezone set |

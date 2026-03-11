@@ -1,7 +1,7 @@
 """
 Fetch active dunning invoices from BigQuery (standalone; no txn_pipeline).
 Uses the enriched subscription+transaction pipeline query. Applies column renames,
-timezone/localized_time processing, and prev_decline_code sanitization.
+timezone/localized_time processing, and prev_decline_code / prev_advice_code_group sanitization.
 """
 from __future__ import annotations
 
@@ -121,7 +121,8 @@ base_raw AS (
         THEN 'Zip Filled'
       ELSE 'Zip not filled'
     END AS fill_zip_code,
-    LOWER(CASE WHEN LOWER(Txn.gateway)='adyen' THEN JSON_EXTRACT_SCALAR(Txn.error_detail_json,'$.decline_message') ELSE Txn.decline_code END) AS decline_code_norm_raw
+    LOWER(CASE WHEN LOWER(Txn.gateway)='adyen' THEN JSON_EXTRACT_SCALAR(Txn.error_detail_json,'$.decline_message') ELSE Txn.decline_code END) AS decline_code_norm_raw,
+    COALESCE(LOWER(TRIM(CAST(Txn.advice_code_group AS STRING))), 'unknown') AS advice_code_group
   FROM eff_txn Txn
   LEFT JOIN sub_flat_best sf ON sf.customer_id = Txn.customer_id
 ),
@@ -227,6 +228,7 @@ SELECT
   invoice_attempt_count,
   Decline_type_for_retry,
   Decline_code_norm,
+  advice_code_group,
   card_status,
   invoice_attempt_no,
   amount,
@@ -247,8 +249,8 @@ def fetch_active_dunning() -> pd.DataFrame:
     """
     Query BigQuery for active dunning using the subscription+transaction pipeline.
     Returns latest row per linked_invoice_id (soft-decline, < 12 attempts, last 5 days).
-    Renames Decline_code_norm -> prev_decline_code, card_status -> prev_card_status,
-    first_attempt_at_calc -> first_attempt_at. Applies timezone and sanitization.
+    Renames Decline_code_norm -> prev_decline_code, advice_code_group -> prev_advice_code_group,
+    card_status -> prev_card_status, first_attempt_at_calc -> first_attempt_at. Applies timezone and sanitization.
     """
     project = os.environ.get("BQ_PROJECT")
     location = os.environ.get("BQ_LOCATION", "europe-west1")
@@ -261,6 +263,8 @@ def fetch_active_dunning() -> pd.DataFrame:
     rename_map = {}
     if "Decline_code_norm" in df.columns:
         rename_map["Decline_code_norm"] = "prev_decline_code"
+    if "advice_code_group" in df.columns:
+        rename_map["advice_code_group"] = "prev_advice_code_group"
     if "card_status" in df.columns:
         rename_map["card_status"] = "prev_card_status"
     if "first_attempt_at" not in df.columns and "first_attempt_at_calc" in df.columns:
@@ -271,9 +275,11 @@ def fetch_active_dunning() -> pd.DataFrame:
     # Align with txn_pipeline: timezone and localized timestamps from country (and optional zip)
     df = add_timezone_features(df)
 
-    # Sanitize prev_decline_code for model (same as training: fillna UNKNOWN)
+    # Sanitize prev_decline_code and prev_advice_code_group for model (same as training: fillna UNKNOWN)
     if "prev_decline_code" in df.columns:
         df["prev_decline_code"] = df["prev_decline_code"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    if "prev_advice_code_group" in df.columns:
+        df["prev_advice_code_group"] = df["prev_advice_code_group"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
     if "billing_country" in df.columns:
         df["billing_country"] = df["billing_country"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
 

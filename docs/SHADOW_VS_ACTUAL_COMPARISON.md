@@ -19,7 +19,7 @@ This document describes the **statistical evaluation pipeline** that compares th
   - **recovered:** 1 if any attempt had `status = 'success'`, else 0.
   - **recovered_at:** timestamp of the first successful attempt (if any).
   - **last_attempt_at:** timestamp of the last attempt.
-  - **prev_decline_code** and **prev_card_status:** from the **"previous" attempt** (the attempt that is the context for the next prediction). For **recovered** invoices this is the **last attempt before the first success** (the failure that preceded recovery), so recovered invoices get the real decline code of that failure, not UNKNOWN. For **unrecovered** invoices this is the **latest** attempt (current failure). The query uses the table’s `Decline_code_norm` and `card_status` columns; the table must have these for the full query to run.
+  - **prev_decline_code**, **prev_advice_code_group**, and **prev_card_status:** from the **"previous" attempt** (the attempt that is the context for the next prediction). For **recovered** invoices this is the **last attempt before the first success** (the failure that preceded recovery), so recovered invoices get the real decline code of that failure, not UNKNOWN. For **unrecovered** invoices this is the **latest** attempt (current failure). The query uses the table’s `Decline_code_norm` and `card_status` columns; the table must have these for the full query to run.
 - **Timestamps:** All timestamps are normalized to **UTC** (then stored tz-naive) for consistent subtraction and comparison.
 - **Merge:** Left-join of actuals onto each shadow view (Initial and Latest) on **`invoice_id`**. The primary output CSV and most report metrics use the **Last-Mile** (latest per invoice) merge.
 
@@ -84,7 +84,7 @@ The report compares **Overall Recovery Rate** and **TTR Lift** for both modes so
 
 ### Transition matrix by decline code
 
-- **Source of prev_decline_code / prev_card_status:** When available from **actuals** (BigQuery or CSV), the script uses those values—they come from the "previous" attempt as above (last failure before success for recovered, latest attempt for unrecovered). Where actuals are missing or null, the script falls back to parsing **`raw_features_snapshot`** JSON from the shadow log. This way recovered invoices show the decline code of the failure that preceded recovery, not UNKNOWN.
+- **Source of prev_decline_code / prev_advice_code_group / prev_card_status:** When available from **actuals** (BigQuery or CSV), the script uses those values—they come from the "previous" attempt as above (last failure before success for recovered, latest attempt for unrecovered). Where actuals are missing or null, the script falls back to parsing **`raw_features_snapshot`** JSON from the shadow log. This way recovered invoices show the decline code of the failure that preceded recovery, not UNKNOWN.
 - **Metrics:** For each decline category (e.g. Insufficient Funds, Technical, Expired Card, UNKNOWN): **recovery rate** and **mean TTR** (hours) among recovered invoices. Use this to see if the model performs better on specific decline types.
 
 ### Top-1 and temporal proximity
@@ -115,7 +115,7 @@ Contains:
 
 ### Comparison CSV: `artifacts/shadow_vs_actual_comparison.csv`
 
-- Based on the **Last-Mile** merge (latest record per invoice). Columns include: shadow fields, `recovered`, `recovered_at`, `last_attempt_at`, `hours_suggested_to_recovered`, `high_prob_missed_by_chargebee`, `high_prob_threshold_used`, `decile`, `recovered_within_top1_window`, **`recovered_within_±6h`**, **`recovered_within_±12h`**, **`recovered_within_±24h`** (when TEMPORAL_WINDOWS_H = [6, 12, 24]), `invoice_amount`, `ev_lift`, `prev_decline_code`, `prev_card_status`. The latter two come from actuals (BQ "previous" attempt) when available, else from the shadow log’s `raw_features_snapshot`.
+- Based on the **Last-Mile** merge (latest record per invoice). Columns include: shadow fields, `recovered`, `recovered_at`, `last_attempt_at`, `hours_suggested_to_recovered`, `high_prob_missed_by_chargebee`, `high_prob_threshold_used`, `decile`, `recovered_within_top1_window`, **`recovered_within_±6h`**, **`recovered_within_±12h`**, **`recovered_within_±24h`** (when TEMPORAL_WINDOWS_H = [6, 12, 24]), `invoice_amount`, `ev_lift`, `prev_decline_code`, `prev_advice_code_group`, `prev_card_status`. The latter come from actuals (BQ "previous" attempt) when available, else from the shadow log’s `raw_features_snapshot`.
 
 ### Calibration plot: `artifacts/calibration_plot.png`
 
@@ -167,6 +167,6 @@ python compare_shadow_vs_actual_20260206.py \
 The script uses `BQ_TABLE` (default: `aa-datamart.billing_dm.MISc_vw_txn_enriched_subID_fallback`). The table must have:
 
 - **Required:** `linked_invoice_id`, `updated_at`, `status` — used to compute `recovered`, `recovered_at`, and `last_attempt_at` per invoice.
-- **Required for prev_decline_code / prev_card_status:** `Decline_code_norm` and `card_status` — the query uses them to populate the "previous" attempt’s decline code and card status (so recovered invoices get the decline code of the failure before the success, not UNKNOWN). If your schema uses different column names (e.g. `decline_code_norm`), adjust the `base` CTE in `fetch_actual_outcomes()`.
+- **Required for prev_decline_code / prev_advice_code_group / prev_card_status:** `Decline_code_norm`, `advice_code_group`, and `card_status` — the query uses them to populate the "previous" attempt’s decline code and card status (so recovered invoices get the decline code of the failure before the success, not UNKNOWN). If your schema uses different column names (e.g. `decline_code_norm`), adjust the `base` CTE in `fetch_actual_outcomes()`.
 
 The query filters `updated_at >= OUTCOMES_START_DATE` (default `2026-02-15`) and returns one row per `linked_invoice_id` with the aggregates and the previous attempt’s `prev_decline_code` and `prev_card_status`. For **invoice_amount** (EV lift), the script derives it from the shadow log’s `raw_features_snapshot` (expm1(log_charge_amount)) or from an `amount` column if you provide actuals via CSV; you can extend the BQ query to include `MAX(CAST(amount AS FLOAT64)) AS amount` if the table has it.

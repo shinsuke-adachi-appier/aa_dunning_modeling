@@ -14,7 +14,8 @@ This document describes all files under **`deploy/`** (shared library, schemas, 
 | **lib/** | Shared library: model load, features, slots, BQ fetch, timezone/country data. Used by inference job only. |
 | **inference_job/** | Entrypoint `main.py`; writes schedule + optional feature log. |
 | **trigger_job/** | Entrypoint `main.py`; reads schedule, Retry API, trigger log. No pre-flight status check. |
-| **bq_schema/** | BigQuery DDL for schedule and trigger log tables. |
+| **retrain_job/** | Entrypoint `main.py`; runs training from repo root (Airflow/cron), uploads model to GCS. See `retrain_job/README.md`. |
+| **bq_schema/** | BigQuery DDL for schedule, trigger log, and training log tables. |
 | **Root** | README, env.example, Dockerfile, requirements-deploy.txt, train_dunning_v2 stub. |
 
 ---
@@ -54,7 +55,7 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 |------|-------------|
 | **Role** | Query BigQuery for active dunning invoices; apply renames, timezone features, sanitization. |
 | **Env** | `BQ_PROJECT` (required); `BQ_LOCATION` (default `europe-west1`). Source data comes from the embedded pipeline query in `lib/bq_fetch.py`, not from `BQ_SOURCE_TABLE`. |
-| **Function** | `fetch_active_dunning()` — SQL: latest row per `linked_invoice_id`, `invoice_success_attempt_no IS NULL`, `invoice_attempt_count < 12`, last 5 days, `Decline_type_for_retry = 'Soft decline'`. Renames `Decline_code_norm` → `prev_decline_code`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at`. Calls `add_timezone_features(df)`; sanitizes `prev_decline_code` and `billing_country` to `"UNKNOWN"`. Returns DataFrame. |
+| **Function** | `fetch_active_dunning()` — SQL: latest row per `linked_invoice_id`, `invoice_success_attempt_no IS NULL`, `invoice_attempt_count < 12`, last 5 days, `Decline_type_for_retry = 'Soft decline'`. Renames `Decline_code_norm` → `prev_decline_code`, `advice_code_group` → `prev_advice_code_group`, `card_status` → `prev_card_status`, `first_attempt_at_calc` → `first_attempt_at`. Calls `add_timezone_features(df)`; sanitizes `prev_decline_code`, `prev_advice_code_group`, and `billing_country` to `"UNKNOWN"`. Returns DataFrame. |
 
 ### 2.5 `lib/timezone_utils.py`
 
@@ -91,6 +92,14 @@ Self-contained module; no dependency on parent repo. Exports: `model`, `features
 | **Table** | `PROJECT_ID.DATASET.dunning_retry_trigger_log` — replace placeholders. |
 | **Columns** | `invoice_id`, `optimal_retry_at_utc`, `triggered_at`, `idempotency_key`, `api_response_status` (HTTP status), `error_message`, `status` (Success \| Failed \| Error \| DRY_RUN \| VELOCITY_CAP_7D), `message`, `txn_id`, `attempt_number`, `comment_status`. |
 | **Written by** | Trigger job (one row per retry API attempt / dry-run log). |
+
+### 3.3 `dunning_training_log.sql`
+
+| Item | Description |
+|------|-------------|
+| **Table** | `PROJECT_ID.DATASET.dunning_training_log` — replace placeholders. |
+| **Columns** | `run_at`, `suffix`, date window fields (`global_start`, `train_end`, `cal_start`, `cal_end`, `val_start`, `val_end`, `holdout_start`), `n_train`, `n_cal`, `n_val`, `auc_val`, `pr_auc_val`, `brier_val`, `ece_val`, `mce_val`, `calibration_temperature`, `model_gcs_uri`. |
+| **Written by** | Retrain job (one row per retrain run). |
 
 ---
 

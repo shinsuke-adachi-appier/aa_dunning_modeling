@@ -29,9 +29,10 @@ from sklearn.isotonic import IsotonicRegression
 class IsotonicCalibratedClassifier:
     """Wraps a fitted classifier and calibrates probabilities via IsotonicRegression. Must match train script for unpickling."""
 
-    def __init__(self, estimator, method="isotonic"):
+    def __init__(self, estimator, method="isotonic", temperature=1.0):
         self.estimator = estimator
         self.method = method
+        self.temperature = float(temperature)
         self.calibrator_ = None
 
     def fit(self, X_cal, y_cal):
@@ -43,6 +44,11 @@ class IsotonicCalibratedClassifier:
     def predict_proba(self, X):
         p = self.estimator.predict_proba(X)[:, 1]
         p_cal = self.calibrator_.predict(p).reshape(-1, 1)
+        p_cal = np.clip(p_cal, 1e-7, 1.0 - 1e-7)
+        temperature = getattr(self, "temperature", 1.0)
+        if temperature != 1.0 and temperature > 0:
+            logit = np.log(p_cal / (1.0 - p_cal))
+            p_cal = 1.0 / (1.0 + np.exp(-np.clip(logit / temperature, -500, 500)))
         p_cal = np.clip(p_cal, 0.0, 1.0)
         return np.hstack([1 - p_cal, p_cal])
 
@@ -55,7 +61,7 @@ class IsotonicCalibratedClassifier:
 SHADOW_DELAY_HOURS = list(range(24, 121, 4))  # 24, 28, ..., 120
 
 # Default calibrated model (match train_dunning_v2_20260301.py suffix when refreshing)
-DEFAULT_CALIBRATED_MODEL = "catboost_dunning_calibrated_20260301.joblib"
+DEFAULT_CALIBRATED_MODEL = "catboost_dunning_calibrated_20260311.joblib"
 
 # Allow importing from src when run from repo root (e.g. python scripts/shadow_monitoring_20260206.py).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -74,7 +80,8 @@ def fetch_active_dunning_invoices() -> pd.DataFrame:
     """
     Connect to BigQuery and pull active dunning invoices (one row per invoice = latest attempt).
     The model predicts the *next* attempt, so the latest attempt's outcome is the "previous" state:
-    we use its Decline_code_norm and card_status as prev_decline_code and prev_card_status.
+    we use its Decline_code_norm, advice_code_group, and card_status as prev_decline_code,
+    prev_advice_code_group, and prev_card_status.
     No LAG: we simply take the latest row and rename those columns.
     """
     try:
@@ -105,6 +112,8 @@ def fetch_active_dunning_invoices() -> pd.DataFrame:
         rename_map = {}
         if "Decline_code_norm" in active_df.columns:
             rename_map["Decline_code_norm"] = "prev_decline_code"
+        if "advice_code_group" in active_df.columns:
+            rename_map["advice_code_group"] = "prev_advice_code_group"
         if "card_status" in active_df.columns:
             rename_map["card_status"] = "prev_card_status"
         if "first_attempt_at" not in active_df.columns and "first_attempt_at_calc" in active_df.columns:
@@ -124,7 +133,7 @@ def fetch_active_dunning_invoices() -> pd.DataFrame:
 
 # Model feature set (must match dunning_modeling.ipynb keep_cols minus target/group).
 MODEL_FEATURE_NAMES = [
-    "prev_decline_code", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
+    "prev_decline_code", "prev_advice_code_group", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
     "dist_to_payday", "log_charge_amount", "is_debit", "amt_per_attempt",
     "time_since_prev_attempt", "cumulative_delay_hours",
     "billing_country", "gateway", "funding_type_norm", "card_brand", "prev_card_status",
@@ -132,8 +141,8 @@ MODEL_FEATURE_NAMES = [
 ]
 
 CAT_FEATURES = [
-    "prev_decline_code", "billing_country", "gateway",
-    "funding_type_norm", "card_brand", "Domain_category",
+    "prev_decline_code", "prev_advice_code_group", "billing_country", "gateway",
+    "funding_type_norm", "card_brand", "Domain_category", "prev_card_status",
 ]
 
 
@@ -157,7 +166,7 @@ def build_invoice_row(
     - time_since_prev_attempt = (as_of_timestamp - base_timestamp) = (inference_run_at - latest_failure_updated_at).
     - cumulative_delay_hours = (as_of_timestamp - first_attempt_at) = (inference_run_at - first_attempt_at).
     - invoice_attempt_no: from the latest record (row), i.e. the attempt number of the current failure.
-    - prev_decline_code / prev_card_status: from the latest attempt (renamed from Decline_code_norm / card_status in fetch).
+    - prev_decline_code / prev_advice_code_group / prev_card_status: from the latest attempt (renamed from Decline_code_norm / advice_code_group / card_status in fetch).
     generate_candidate_slots overwrites temporal features per slot.
     """
     base = pd.Timestamp(base_timestamp)   # latest_failure_updated_at
@@ -191,6 +200,7 @@ def build_invoice_row(
 
     out = pd.Series({
         "prev_decline_code": _safe_str(row.get("prev_decline_code")),
+        "prev_advice_code_group": _safe_str(row.get("prev_advice_code_group")),
         "hour_sin": hour_sin, "hour_cos": hour_cos,
         "dow_sin": dow_sin, "dow_cos": dow_cos,
         "day_sin": day_sin, "day_cos": day_cos,

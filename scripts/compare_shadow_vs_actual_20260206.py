@@ -71,7 +71,7 @@ def fetch_actual_outcomes(
 ) -> pd.DataFrame:
     """
     Load actual outcomes from BigQuery: recovered, recovered_at, last_attempt_at,
-    prev_decline_code, prev_card_status per linked_invoice_id (attempts with
+    prev_decline_code, prev_advice_code_group, prev_card_status per linked_invoice_id (attempts with
     updated_at >= start_date). prev_* from "previous" attempt (last failure before
     success for recovered, latest for unrecovered).
     """
@@ -83,6 +83,7 @@ def fetch_actual_outcomes(
     WITH base AS (
       SELECT linked_invoice_id, updated_at, status,
         COALESCE(CAST(Decline_code_norm AS STRING), 'unknown') AS prev_decline_code,
+        COALESCE(CAST(advice_code_group AS STRING), 'unknown') AS prev_advice_code_group,
         COALESCE(CAST(card_status AS STRING), 'unknown') AS prev_card_status
       FROM {full_table}
       WHERE updated_at >= TIMESTAMP('{start_date}')
@@ -96,7 +97,7 @@ def fetch_actual_outcomes(
       GROUP BY linked_invoice_id
     ),
     ranked AS (
-      SELECT b.linked_invoice_id, b.updated_at, b.prev_decline_code, b.prev_card_status,
+      SELECT b.linked_invoice_id, b.updated_at, b.prev_decline_code, b.prev_advice_code_group, b.prev_card_status,
         r.recovered, r.recovered_at, r.last_attempt_at,
         ROW_NUMBER() OVER (
           PARTITION BY b.linked_invoice_id
@@ -112,12 +113,13 @@ def fetch_actual_outcomes(
       WHERE (r.recovered = 1 AND b.updated_at < r.recovered_at) OR (r.recovered = 0)
     ),
     prev_attempt AS (
-      SELECT linked_invoice_id, prev_decline_code, prev_card_status
+      SELECT linked_invoice_id, prev_decline_code, prev_advice_code_group, prev_card_status
       FROM ranked
       WHERE rn_prev = 1
     )
     SELECT r.linked_invoice_id AS invoice_id, r.recovered, r.recovered_at, r.last_attempt_at,
       COALESCE(p.prev_decline_code, 'unknown') AS prev_decline_code,
+      COALESCE(p.prev_advice_code_group, 'unknown') AS prev_advice_code_group,
       COALESCE(p.prev_card_status, 'unknown') AS prev_card_status
     FROM recovered_at_per_inv r
     LEFT JOIN prev_attempt p ON r.linked_invoice_id = p.linked_invoice_id
@@ -207,7 +209,7 @@ def _enrich_merged(
     """
     Add: hours_suggested_to_recovered (valid only when recovered_at >= inference_run_at),
     high_prob_missed_by_chargebee, high_prob_threshold_used, decile, temporal window
-    flags, invoice_amount, ev_lift. Fill prev_decline_code/prev_card_status from
+    flags, invoice_amount, ev_lift. Fill prev_decline_code/prev_advice_code_group/prev_card_status from
     raw_features_snapshot when missing from actuals.
     """
     temporal_windows_h = temporal_windows_h or TEMPORAL_WINDOWS_H
@@ -259,9 +261,13 @@ def _enrich_merged(
                 df.loc[df["recovered"].fillna(0).astype(bool), "hours_suggested_to_recovered"].abs() <= h
             )
 
-    # prev_decline_code / prev_card_status from snapshot when missing
+    # prev_decline_code / prev_advice_code_group / prev_card_status from snapshot when missing
     if "raw_features_snapshot" in df.columns:
-        for key, col in (("prev_decline_code", "prev_decline_code"), ("prev_card_status", "prev_card_status")):
+        for key, col in (
+            ("prev_decline_code", "prev_decline_code"),
+            ("prev_advice_code_group", "prev_advice_code_group"),
+            ("prev_card_status", "prev_card_status"),
+        ):
             if col not in df.columns:
                 df[col] = None
             missing = df[col].isna() | (df[col].astype(str).str.strip() == "")
@@ -273,7 +279,7 @@ def _enrich_merged(
                     except Exception:
                         return None
                 df.loc[missing, col] = df.loc[missing, "raw_features_snapshot"].map(_get)
-    for col in ("prev_decline_code", "prev_card_status"):
+    for col in ("prev_decline_code", "prev_advice_code_group", "prev_card_status"):
         if col in df.columns:
             df[col] = df[col].fillna("unknown").astype(str).str.strip().replace("", "unknown")
 

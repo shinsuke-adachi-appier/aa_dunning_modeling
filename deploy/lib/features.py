@@ -13,7 +13,7 @@ import pandas as pd
 DELAY_HOURS = list(range(24, 121, 4))
 
 MODEL_FEATURE_NAMES = [
-    "prev_decline_code", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
+    "prev_decline_code", "prev_advice_code_group", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "day_sin", "day_cos",
     "dist_to_payday", "log_charge_amount", "is_debit", "amt_per_attempt",
     "time_since_prev_attempt", "cumulative_delay_hours",
     "billing_country", "gateway", "funding_type_norm", "card_brand", "prev_card_status",
@@ -21,7 +21,7 @@ MODEL_FEATURE_NAMES = [
 ]
 
 CAT_FEATURES = [
-    "prev_decline_code", "billing_country", "gateway",
+    "prev_decline_code", "prev_advice_code_group", "billing_country", "gateway",
     "funding_type_norm", "card_brand", "Domain_category", "prev_card_status",
 ]
 
@@ -34,6 +34,7 @@ FEATURE_LOG_SCHEMA = (
     [("inference_run_id", "STRING"), ("created_at", "TIMESTAMP"), ("invoice_id", "STRING"), ("model_version_id", "STRING")]
     + [
         ("prev_decline_code", "STRING"),
+        ("prev_advice_code_group", "STRING"),
         ("hour_sin", "FLOAT64"), ("hour_cos", "FLOAT64"),
         ("dow_sin", "FLOAT64"), ("dow_cos", "FLOAT64"),
         ("day_sin", "FLOAT64"), ("day_cos", "FLOAT64"),
@@ -112,6 +113,7 @@ def build_invoice_row(
 
     out = pd.Series({
         "prev_decline_code": _safe_str(row.get("prev_decline_code")),
+        "prev_advice_code_group": _safe_str(row.get("prev_advice_code_group")),
         "hour_sin": hour_sin, "hour_cos": hour_cos,
         "dow_sin": dow_sin, "dow_cos": dow_cos,
         "day_sin": day_sin, "day_cos": day_cos,
